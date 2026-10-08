@@ -392,7 +392,7 @@ int compress_write(struct compress *compress, const void *buf, unsigned int size
 int compress_read(struct compress *compress, void *buf, unsigned int size)
 {
 	struct snd_compr_avail avail;
-	struct pollfd fds;
+	struct pollfd fds = {0};
 	int to_read = 0;
 	int num_read, total = 0, ret;
 	char* cbuf = buf;
@@ -415,6 +415,7 @@ int compress_read(struct compress *compress, void *buf, unsigned int size)
 			if (compress->nonblocking)
 				return total;
 
+			fds.revents = 0;
 			ret = compress->ops->poll(compress->data, &fds, 1,
 							compress->max_poll_wait_ms);
 			if (fds.revents & POLLERR) {
@@ -442,6 +443,10 @@ int compress_read(struct compress *compress, void *buf, unsigned int size)
 				break;
 			return oops(compress, errno, "read failed!");
 		}
+
+		/* A stopped stream may return EOF without setting errno. */
+		if (num_read == 0)
+			break;
 
 		size -= num_read;
 		cbuf += num_read;

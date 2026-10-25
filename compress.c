@@ -405,8 +405,10 @@ int compress_read(struct compress *compress, void *buf, unsigned int size)
 	fds.events = POLLIN;
 
 	while (size) {
-		if (compress->ops->ioctl(compress->data, SNDRV_COMPRESS_AVAIL, &avail))
-			return oops(compress, errno, "cannot get avail");
+		if (compress->ops->ioctl(compress->data, SNDRV_COMPRESS_AVAIL, &avail)) {
+			total = oops(compress, errno, "cannot get avail");
+			goto out;
+		}
 
 		if ( (avail.avail < frag_size) && (avail.avail < size) ) {
 			/* Less than one fragment available and not at the
@@ -419,14 +421,21 @@ int compress_read(struct compress *compress, void *buf, unsigned int size)
 			ret = compress->ops->poll(compress->data, &fds, 1,
 							compress->max_poll_wait_ms);
 			if (fds.revents & POLLERR) {
-				return oops(compress, EIO, "poll returned error!");
+				total = oops(compress, EIO, "poll returned error!");
+				goto out;
 			}
-			/* A pause will cause -EBADFD or zero.
-			 * This is not an error, just stop reading */
-			if ((ret == 0) || (ret < 0 && errno == EBADFD))
+			/* Preserve partial byte counts, but let legacy capture callers
+			 * distinguish a timeout from a complete frame through errno. */
+			if (ret == 0) {
+				errno = ETIMEDOUT;
 				break;
-			if (ret < 0)
-				return oops(compress, errno, "poll error");
+			}
+			if (ret < 0 && errno == EBADFD)
+				break;
+			if (ret < 0) {
+				total = oops(compress, errno, "poll error");
+				goto out;
+			}
 			if (fds.revents & POLLIN) {
 				continue;
 			}
@@ -441,18 +450,28 @@ int compress_read(struct compress *compress, void *buf, unsigned int size)
 			/* If play was paused the read returns -EBADFD */
 			if (errno == EBADFD)
 				break;
-			return oops(compress, errno, "read failed!");
+			total = oops(compress, errno, "read failed!");
+			goto out;
 		}
 
 		/* A stopped stream may return EOF without setting errno. */
-		if (num_read == 0)
+		if (num_read == 0) {
+			if (!compress->nonblocking)
+				errno = ENODATA;
 			break;
+		}
 
 		size -= num_read;
 		cbuf += num_read;
 		total += num_read;
 	}
 
+out:
+	/* Some legacy capture HALs return the requested frame size even after
+	 * an error. Never leave an unread blocking-frame tail containing old
+	 * samples; normal nonblocking short reads retain their existing ABI. */
+	if (size && !compress->nonblocking)
+		memset(cbuf, 0, size);
 	return total;
 }
 
